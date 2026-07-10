@@ -1,0 +1,9 @@
+arm_venv/
+checkpoints/
+wandb/
+__pycache__/
+*.pyc
+*.pth
+*.pt
+data/
+check.py
