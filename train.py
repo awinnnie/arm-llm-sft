@@ -1,6 +1,6 @@
 import wandb
 import torch 
-from sklearn.model_selection import train_test_split
+# from sklearn.model_selection import train_test_split
 import pandas as pd
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
@@ -9,7 +9,7 @@ from trl import SFTTrainer, SFTConfig
 import transformers.utils.import_utils as _utils
 _utils.check_torch_load_is_safe = lambda: None
 
-from eval_data import load_generation_examples, load_tatoeba, load_wiki, load_sim_model
+from eval_data import load_generation_examples, load_tatoeba, load_wiki
 from callbacks import CustomEvalCallback
 
 wandb.init(project="qwen3-finetune", name="exp-002-base-2k-10ktask", resume="allow", id="exp-002-run",
@@ -151,7 +151,6 @@ training_args = SFTConfig(
 
 tatoeba_pairs = load_tatoeba("../../data/tatoeba/data/train-00000-of-00001.parquet")
 wiki_hy, wiki_en = load_wiki("../../data/wikipedia_eval/data/train-00000-of-00001.parquet")
-sim_model = load_sim_model()
 
 eval_callback = CustomEvalCallback(
     model=model,
@@ -160,7 +159,6 @@ eval_callback = CustomEvalCallback(
     tatoeba_pairs=tatoeba_pairs,
     wiki_hy_texts=wiki_hy,
     wiki_en_texts=wiki_en,
-    sim_model=sim_model,
     eval_every=20,
 )
 

@@ -1,5 +1,4 @@
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 
 def load_generation_examples(df):
     preferred_tasks = [
@@ -33,5 +32,3 @@ def load_wiki(path):
     en = df[df['lang'] == 'en'].sample(10, random_state=42)['text'].tolist()
     return hy, en
 
-def load_sim_model():
-    return SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")

@@ -1,18 +1,16 @@
 import math
 import torch
 import wandb
-from sentence_transformers import util
 from transformers import TrainerCallback
 
 class CustomEvalCallback(TrainerCallback):
-    def __init__(self, model, tokenizer, generation_examples, tatoeba_pairs, wiki_hy_texts, wiki_en_texts, sim_model, eval_every=20):
+    def __init__(self, model, tokenizer, generation_examples, tatoeba_pairs, wiki_hy_texts, wiki_en_texts, eval_every=20):
         self.model = model
         self.tokenizer = tokenizer
         self.generation_examples = generation_examples
         self.tatoeba_pairs = tatoeba_pairs
         self.wiki_hy_texts = wiki_hy_texts
         self.wiki_en_texts = wiki_en_texts
-        self.sim_model = sim_model
         self.eval_every = eval_every
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -54,9 +52,9 @@ class CustomEvalCallback(TrainerCallback):
             generated = self._generate(messages)
             rows.append([
                 ex['task'],
-                messages[-2]['content'][:200],  # user input (truncated for display)
-                reference[:200],
-                generated[:200],
+                messages[-2]['content'],  # user input
+                reference,
+                generated,
                 step
             ])
 
@@ -66,20 +64,23 @@ class CustomEvalCallback(TrainerCallback):
         )
         wandb.log({"custom_evaluation/generations": table}, step=step)
 
+    def _get_embedding(self, text):
+        inputs = self.tokenizer(
+            text, return_tensors="pt", truncation=True, max_length=512
+        ).to(self.model.device)
+        outputs = self.model(**inputs, output_hidden_states=True)
+        
+        hidden = outputs.hidden_states[-1] # [1, seq_len, hidden_size]
+        embedding = hidden.mean(dim=1) # [1, hidden_size]
+        return embedding 
+    
     def _log_tatoeba(self, step):
         similarities = []
         for pair in self.tatoeba_pairs:
-            # prompt model to translate en -> hy
-            messages = [
-                {"role": "system", "content": "You are a translator. Translate the given English text to Armenian."},
-                {"role": "user", "content": pair['en']}
-            ]
-            generated_hy = self._generate(messages + [{"role": "assistant", "content": ""}])
-
-            # compute cosine similarity between generated and reference
-            emb_gen = self.sim_model.encode(generated_hy, convert_to_tensor=True)
-            emb_ref = self.sim_model.encode(pair['hy'], convert_to_tensor=True)
-            sim = util.cos_sim(emb_gen, emb_ref).item()
+            # compute cosine similarity
+            emb_en =self._get_embedding(pair['en'])
+            emb_hy = self._get_embedding(pair['hy'])
+            sim = torch.nn.functional.cosine_similarity(emb_en, emb_hy).item()
             similarities.append(sim)
 
         avg_sim = sum(similarities) / len(similarities)
