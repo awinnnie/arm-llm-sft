@@ -45,7 +45,7 @@ class CustomEvalCallback(TrainerCallback):
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=200,
+                max_new_tokens=1024,
                 do_sample=False,
                 temperature=1.0,
             )

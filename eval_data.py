@@ -12,7 +12,7 @@ def load_generation_examples(df):
     for task in preferred_tasks:
         subset = df[df['task_type'] == task]
         if len(subset) > 0:
-            row = subset.sample(1, random_state=24).iloc[0]
+            row = subset.sample(1, random_state=42).iloc[0]
             examples.append({
                 "task": task,
                 "messages": row['messages']
