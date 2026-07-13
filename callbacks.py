@@ -2,6 +2,7 @@ import math
 import torch
 import wandb
 from transformers import TrainerCallback
+import time
 
 class CustomEvalCallback(TrainerCallback):
     def __init__(self, model, tokenizer, generation_examples, tatoeba_pairs, wiki_hy_texts, wiki_en_texts, eval_every=20):
@@ -12,8 +13,18 @@ class CustomEvalCallback(TrainerCallback):
         self.wiki_hy_texts = wiki_hy_texts
         self.wiki_en_texts = wiki_en_texts
         self.eval_every = eval_every
+        self.start_time = None
 
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.start_time = time.time()
+    
     def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step > 0:
+            elapsed = time.time() - self.start_time
+            wandb.log({
+                "train/seconds_per_step": elapsed / state.global_step
+            }, step=state.global_step)
+        
         if state.global_step % self.eval_every == 0:
             self.model.eval()
             with torch.no_grad():

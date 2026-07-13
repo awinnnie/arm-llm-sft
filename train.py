@@ -3,7 +3,7 @@ import torch
 # from sklearn.model_selection import train_test_split
 import pandas as pd
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, DataCollatorForSeq2Seq
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer, SFTConfig
 import transformers.utils.import_utils as _utils
@@ -12,13 +12,13 @@ _utils.check_torch_load_is_safe = lambda: None
 from eval_data import load_generation_examples, load_tatoeba, load_wiki
 from callbacks import CustomEvalCallback
 
-wandb.init(project="qwen3-finetune", name="exp-002-base-2k-10ktask", resume="allow", id="exp-002-run",
+wandb.init(project="qwen3-finetune", name="exp-003-base-2k-10ktask-fix", resume="allow", id="exp-003-run-v2",
 	config={
         	"model": "Qwen3-4B-Instruct-2507",
         	"r": 1,
         	"learning_rate": 2e-4,
         	"max_seq_length": 1024,
-        	"epochs": 3,
+        	"epochs": 2,
     	}
 )
 
@@ -82,24 +82,63 @@ model_name = "Qwen/Qwen3-4B-Instruct-2507"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-def format(e):
-    messages = e["messages"]
+def tokenize_and_mask(example):
+    messages = example["messages"]
     if hasattr(messages, 'tolist'):
         messages = messages.tolist()
     messages = [dict(d) for d in messages]
-    return {
-        "text": tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False
-        )
-    }
+    
+    full_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False
+    )
+    
+    tokenized = tokenizer(
+        full_text,
+        max_length=1024,
+        truncation=True,
+        padding=False,
+        # ensuring we don't accidentally add BOS/EOS tokens that shift the index
+        add_special_tokens=False 
+    )
+    
+    input_ids = tokenized['input_ids']
+    labels = [-100] * len(input_ids)  # mask everything by default
+    
+    # exact ID sequences for Qwen
+    assistant_header = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+    end_token = tokenizer.encode("<|im_end|>", add_special_tokens=False)
+    
+    i = 0
+    while i < len(input_ids):
+        # check if current position matches the sequence of assistant_header IDs
+        if input_ids[i:i+len(assistant_header)] == assistant_header:
+            i += len(assistant_header)  # skip past header
+            
+            # unmask tokens until end token
+            while i < len(input_ids):
+                if input_ids[i:i+len(end_token)] == end_token:
+                    # unmask end token asw
+                    for j in range(len(end_token)):
+                        if i+j < len(input_ids):
+                            labels[i+j] = input_ids[i+j]
+                    i += len(end_token)
+                    break
+                
+                labels[i] = input_ids[i]
+                i += 1
+        else:
+            i += 1
+    
+    tokenized['labels'] = labels
+    return tokenized
+
+train_dataset = Dataset.from_pandas(train_df[['messages']]).map(tokenize_and_mask, remove_columns=['messages'])
+val_dataset = Dataset.from_pandas(val_df[['messages']]).map(tokenize_and_mask, remove_columns=['messages'])
 
 
 generation_examples = load_generation_examples(df)
-
-train_dataset = Dataset.from_pandas(train_df[['messages']]).map(format)
-val_dataset = Dataset.from_pandas(val_df[['messages']]).map(format)
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -127,7 +166,7 @@ model.print_trainable_parameters()
 
 training_args = SFTConfig(
     output_dir="./checkpoints",
-    num_train_epochs=3,  #d
+    num_train_epochs=2,  #d
     per_device_train_batch_size=1, #g
     gradient_accumulation_steps=16, #g
     learning_rate=2e-4,
@@ -135,14 +174,13 @@ training_args = SFTConfig(
     warmup_ratio=0.1,
     fp16=False, #g
     bf16=False,
-    logging_steps=15, #d
+    logging_steps=20, #d
     save_steps=50, #d
     save_total_limit=3,
     load_best_model_at_end=False,
     eval_strategy="steps",
-    eval_steps=15,
+    eval_steps=20,
     report_to="wandb",
-    dataset_text_field="text",
     max_length=1024,
 )
 
@@ -162,14 +200,27 @@ eval_callback = CustomEvalCallback(
     eval_every=20,
 )
 
+collator = DataCollatorForSeq2Seq(
+    tokenizer=tokenizer,
+    model=model,
+    padding=True,
+    label_pad_token_id=-100,
+)
+
 trainer = SFTTrainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
-    # data_collator=collator,
+    data_collator=collator,
     callbacks=[eval_callback],
 )
 
-trainer.train(resume_from_checkpoint="./checkpoints/checkpoint-150")
+# log base model generations at step 0
+eval_callback.model.eval()
+with torch.no_grad():
+    eval_callback._log_generations(0)
+eval_callback.model.train()
+
+trainer.train()
 wandb.finish()
