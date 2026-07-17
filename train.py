@@ -8,39 +8,34 @@ from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer, SFTConfig
 import transformers.utils.import_utils as _utils
 _utils.check_torch_load_is_safe = lambda: None
+from config import config
 
 from eval_data import load_generation_examples, load_tatoeba, load_wiki
 from callbacks import CustomEvalCallback
 
-wandb.init(project="qwen3-finetune", name="exp-003-base-2k-10ktask-fix", resume="allow", id="exp-003-run-v2",
-	config={
-        	"model": "Qwen3-4B-Instruct-2507",
-        	"r": 1,
-        	"learning_rate": 2e-4,
-        	"max_seq_length": 1024,
-        	"epochs": 2,
-    	}
+wandb.init(project=config["project"], name=config["run_name"], resume="allow", id=config["run_id"],
+	config=config
 )
 
-df1 = pd.read_parquet("../../data/it_data/data/train-00000-of-00003.parquet")
-df2 = pd.read_parquet("../../data/it_data/data/train-00001-of-00003.parquet")
-df3 = pd.read_parquet("../../data/it_data/data/train-00002-of-00003.parquet")
+df1 = pd.read_parquet(config["train_parquets"][0])
+df2 = pd.read_parquet(config["train_parquets"][1])
+df3 = pd.read_parquet(config["train_parquets"][2])
 
 df = pd.concat([df1, df2, df3]).reset_index(drop=True)
 print("after concat:", df.columns.tolist())
 
 task_counts = df['task_type'].value_counts()
-eligible_tasks = task_counts[task_counts > 10000].index
+eligible_tasks = task_counts[task_counts > config["min_task_count"]].index
 
 hy = df[(df['language'] == 'hy') & (df['task_type'].isin(eligible_tasks))]
 en = df[(df['language'] == 'en') & (df['task_type'].isin(eligible_tasks))]
-en_hy = df[(df['language'] == 'en_hy') & (df['task_type'].isin(eligible_tasks))]
+en_hy = df[(df['language'] == 'en-hy') & (df['task_type'].isin(eligible_tasks))]
 
 df = pd.concat([
-    hy.sample(min(len(hy), 1600), random_state=42),
-    en.sample(min(len(en), 200), random_state=42),
-    en_hy.sample(min(len(en_hy), 200), random_state=42),
-]).sample(frac=1, random_state=42).reset_index(drop=True)
+    hy.sample(min(len(hy), config["language_weights"]["hy"]), random_state=config["random_state"]),
+    en.sample(min(len(en), config["language_weights"]["en"]), random_state=config["random_state"]),
+    en_hy.sample(min(len(en_hy), config["language_weights"]["en-hy"]), random_state=config["random_state"]),
+]).sample(frac=1, random_state=config["random_state"]).reset_index(drop=True)
 
 print("after language filter:", df.columns.tolist())
 
@@ -50,35 +45,35 @@ samples = []
 for task in eligible_tasks:
     task_df = df_eligible[df_eligible['task_type'] == task]
     n = min(len(task_df), max(1, round(2000 * len(task_df) / len(df_eligible))))
-    samples.append(task_df.sample(n=n, random_state=42))
+    samples.append(task_df.sample(n=n, random_state=config["random_state"]))
 
-df = pd.concat(samples).sample(frac=1, random_state=42).reset_index(drop=True).iloc[:2000]
+df = pd.concat(samples).sample(frac=1, random_state=config["random_state"]).reset_index(drop=True).iloc[:config["train_samples"]]
 
 
-# train — same as before, no change
-train_df = df  # full 2000 samples for training
+# train 
+train_df = df 
 
-# test — load from test parquet, apply same filters
-test_raw = pd.read_parquet("../../data/it_data/data/test-00000-of-00001.parquet")
+# test 
+test_raw = pd.read_parquet(config["test_data"])
 
 task_counts_test = test_raw['task_type'].value_counts()
 eligible_tasks_test = task_counts_test[task_counts_test > 0].index  # keep all tasks that exist
 
 test_raw = test_raw[test_raw['task_type'].isin(eligible_tasks)]  # same eligible tasks as train
-test_raw = test_raw[test_raw['language'].isin(['hy', 'en', 'en_hy'])]  # same languages
+test_raw = test_raw[test_raw['language'].isin(config["languages"])]  # same languages
 
-# proportional sample, 200 rows (10% of 2000)
+# proportional sample
 test_samples = []
 for task in eligible_tasks:
     task_df = test_raw[test_raw['task_type'] == task]
     if len(task_df) == 0:
         continue
     n = min(len(task_df), max(1, round(200 * len(task_df) / len(test_raw[test_raw['task_type'].isin(eligible_tasks)]))))
-    test_samples.append(task_df.sample(n=n, random_state=42))
+    test_samples.append(task_df.sample(n=n, random_state=config["random_state"]))
 
-val_df = pd.concat(test_samples).sample(frac=1, random_state=42).reset_index(drop=True).iloc[:200]
+val_df = pd.concat(test_samples).sample(frac=1, random_state=config["random_state"]).reset_index(drop=True).iloc[:config["test_samples"]]
 
-model_name = "Qwen/Qwen3-4B-Instruct-2507"
+model_name = config["model_name"]
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -153,10 +148,10 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 lora_config = LoraConfig(
-    r=1,
-    lora_alpha=2,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "up_proj", "down_proj"],
-    lora_dropout=0.05,
+    r=config["r"],
+    lora_alpha=config["lora_alpha"],
+    target_modules=config["target_modules"],
+    lora_dropout=config["lora_dropout"],
     bias="none",
     task_type="CAUSAL_LM",
    )
@@ -166,29 +161,29 @@ model.print_trainable_parameters()
 
 training_args = SFTConfig(
     output_dir="./checkpoints",
-    num_train_epochs=2,  #d
-    per_device_train_batch_size=1, #g
-    gradient_accumulation_steps=16, #g
-    learning_rate=2e-4,
-    lr_scheduler_type="cosine",
-    warmup_ratio=0.1,
+    num_train_epochs=config["epochs"],  #d
+    per_device_train_batch_size=config["batch_size"], #g
+    gradient_accumulation_steps=config["grad_accumulation"], #g
+    learning_rate=config["learning_rate"], #g
+    lr_scheduler_type=config["lr_scheduler"],
+    warmup_ratio=config["warmup_ratio"], #g
     fp16=False, #g
     bf16=False,
-    logging_steps=20, #d
-    save_steps=50, #d
-    save_total_limit=3,
+    logging_steps=config["logging_steps"], #d
+    save_steps=config["save_steps"], #d
+    save_total_limit=config["save_total_limit"], #d
     load_best_model_at_end=False,
     eval_strategy="steps",
-    eval_steps=20,
+    eval_steps=config["eval_steps"],
     report_to="wandb",
-    max_length=1024,
+    max_length=config["max_length"],
 )
 
 # loss only on assisstant turns
 
 
-tatoeba_pairs = load_tatoeba("../../data/tatoeba/data/train-00000-of-00001.parquet")
-wiki_hy, wiki_en = load_wiki("../../data/wikipedia_eval/data/train-00000-of-00001.parquet")
+tatoeba_pairs = load_tatoeba(config["tatoeba"])
+wiki_hy, wiki_en = load_wiki(config["wiki"])
 
 eval_callback = CustomEvalCallback(
     model=model,
@@ -197,7 +192,7 @@ eval_callback = CustomEvalCallback(
     tatoeba_pairs=tatoeba_pairs,
     wiki_hy_texts=wiki_hy,
     wiki_en_texts=wiki_en,
-    eval_every=20,
+    eval_every=config["eval_every"],
 )
 
 collator = DataCollatorForSeq2Seq(
